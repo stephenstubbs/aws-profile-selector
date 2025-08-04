@@ -12,40 +12,60 @@ A fast, interactive AWS profile selector CLI tool built in Rust.
 
 ## Installation
 
-### Using Nix (Recommended)
-
-If you have Nix with flakes enabled:
-
-1. **Direct Installation:**
+### Option 1: Direct Installation with Nix Profile
 ```bash
+# Install directly from GitHub
 nix profile install github:stephenstubbs/aws-profile-selector
+
+# Verify installation
 aws-profile-selector --help
 ```
 
-2. **Run Without Installing:**
+### Option 2: Run Without Installing
 ```bash
+# Run directly from GitHub
 nix run github:stephenstubbs/aws-profile-selector -- --help
 ```
 
-3. **Development Environment:**
+### Option 3: Add to Your Flake
+Add to `flake.nix` inputs:
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+
+    aws-profile-selector = {
+      url = "github:stephenstubbs/aws-profile-selector";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
+
+  outputs = { self, nixpkgs, aws-profile-selector, ... }:
+    let
+      system = "x86_64-linux";
+      pkgs = nixpkgs.legacyPackages.${system};
+    in
+    {
+      devShells.${system}.default = pkgs.mkShell {
+        packages = [
+          aws-profile-selector.packages.${system}.default
+        ];
+      };
+    };
+}
+```
+
+### Option 4: Development Environment
 ```bash
+# Clone and enter development environment
 git clone https://github.com/stephenstubbs/aws-profile-selector
 cd aws-profile-selector
 nix develop
+
+# Build and run
 cargo build --release
 ./target/release/aws-profile-selector --help
 ```
-
-### Manual Build
-
-1. Clone and build:
-```bash
-git clone https://github.com/stephenstubbs/aws-profile-selector
-cd aws-profile-selector
-cargo build --release
-```
-
-2. The binary will be available at `./target/release/aws-profile-selector`
 
 ## Usage
 
