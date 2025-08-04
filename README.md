@@ -1,0 +1,170 @@
+# AWS Profile Selector
+
+A fast, interactive AWS profile selector CLI tool built in Rust.
+
+## Features
+
+- 🔍 **Fuzzy search** through AWS profiles
+- ⚡ **Fast inline interface** - no full-screen takeover
+- 🎯 **Arrow key navigation**
+- 🔧 **Cross-shell support** (bash, zsh, fish, nushell, PowerShell)
+- 📦 **Single binary** with no runtime dependencies
+
+## Installation
+
+### Using Nix (Recommended)
+
+If you have Nix with flakes enabled:
+
+1. **Direct Installation:**
+```bash
+nix profile install github:stephenstubbs/aws-profile-selector
+aws-profile-selector --help
+```
+
+2. **Run Without Installing:**
+```bash
+nix run github:stephenstubbs/aws-profile-selector -- --help
+```
+
+3. **Development Environment:**
+```bash
+git clone https://github.com/stephenstubbs/aws-profile-selector
+cd aws-profile-selector
+nix develop
+cargo build --release
+./target/release/aws-profile-selector --help
+```
+
+### Manual Build
+
+1. Clone and build:
+```bash
+git clone https://github.com/stephenstubbs/aws-profile-selector
+cd aws-profile-selector
+cargo build --release
+```
+
+2. The binary will be available at `./target/release/aws-profile-selector`
+
+## Usage
+
+### Direct Usage
+
+Run the selector directly:
+```bash
+./target/release/aws-profile-selector
+```
+
+**Interactive Mode (default):**
+```bash
+aws-profile-selector                    # Interactive selection
+```
+
+**Direct Profile Activation:**
+```bash
+aws-profile-selector -a dev             # Activate 'dev' profile directly
+aws-profile-selector --activate prod    # Activate 'prod' profile directly
+```
+
+**Deactivate Profile:**
+```bash
+aws-profile-selector -d                 # Deactivate AWS_PROFILE
+aws-profile-selector --deactivate       # Deactivate AWS_PROFILE
+```
+
+**Options:**
+- `-a, --activate <PROFILE>`: Activate a specific profile by name (skips interactive selection)
+- `-d, --deactivate`: Deactivate AWS_PROFILE
+
+### Shell Integration (Nushell)
+
+Add these functions and hooks to your nushell config (`~/.config/nushell/config.nu`):
+
+```nu
+def --env load_aws_profile [] {
+    let current_profile_file = ([$env.HOME ".aws" "current-profile"] | path join)
+
+    if ($current_profile_file | path exists) {
+        let profile_name = (open $current_profile_file | str trim)
+        if ($profile_name | is-not-empty) {
+            $env.AWS_PROFILE = $profile_name
+        }
+    } else {
+        if "AWS_PROFILE" in $env {
+            hide-env AWS_PROFILE
+        }
+    }
+}
+
+# Set up hooks to automatically load AWS profile
+$env.config = ($env.config | upsert hooks {
+    pre_prompt: [
+        { ||
+            load_aws_profile
+        }
+    ]
+    env_change: {
+        PWD: [
+            { |before, after|
+                load_aws_profile
+            }
+        ]
+    }
+})
+
+# Load AWS profile on initial startup
+load_aws_profile
+```
+
+This configuration will:
+- **Automatically load the AWS profile** when nushell starts
+- **Re-load the AWS profile** every time you change directories (`cd`)
+- **Re-load the AWS profile** before each prompt is displayed
+- **Provide the `awsps` command** for interactive profile selection and management
+
+
+## How It Works
+
+1. **Reads your AWS config** from `~/.aws/config`
+2. **Parses profile sections** and extracts metadata (account ID, region, role name)
+3. **Presents an interactive list** with fuzzy search capabilities
+4. **Stores the selected profile** in `~/.aws/current-profile`
+5. **Nushell integration** reads this file to set `$env.AWS_PROFILE`
+
+## Interface
+
+- **↑/↓ arrows**: Navigate through profiles
+- **Type**: Filter profiles with fuzzy search (no need to press `/`)
+- **Enter**: Select the highlighted profile
+- **Esc/q**: Cancel and exit
+
+## AWS Config Format
+
+The tool reads standard AWS config files. Example:
+
+```ini
+[profile dev]
+sso_account_id = 123456789012
+sso_role_name = DeveloperAccess
+region = us-west-2
+sso_start_url = https://example.awsapps.com/start
+
+[profile prod]
+sso_account_id = 987654321098
+sso_role_name = ReadOnlyAccess
+region = us-east-1
+sso_start_url = https://example.awsapps.com/start
+```
+
+## Dependencies
+
+- **inquire**: For the interactive terminal interface
+- **clap**: For command-line argument parsing
+- **regex**: For AWS config file parsing
+- **anyhow**: For error handling
+- **dirs**: For cross-platform home directory detection
+
+## License
+
+MIT License
