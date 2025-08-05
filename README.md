@@ -7,7 +7,6 @@ A fast, interactive AWS profile selector CLI tool built in Rust.
 - 🔍 **Fuzzy search** through AWS profiles
 - ⚡ **Fast inline interface** - no full-screen takeover
 - 🎯 **Arrow key navigation**
-- 🔧 **Cross-shell support** (bash, zsh, fish, nushell, PowerShell)
 - 📦 **Single binary** with no runtime dependencies
 
 ## Installation
@@ -132,9 +131,6 @@ $env.config = ($env.config | upsert hooks {
         ]
     }
 })
-
-# Load AWS profile on initial startup
-load_aws_profile
 ```
 
 This configuration will:
@@ -176,14 +172,6 @@ sso_role_name = ReadOnlyAccess
 region = us-east-1
 sso_start_url = https://example.awsapps.com/start
 ```
-
-## Dependencies
-
-- **inquire**: For the interactive terminal interface
-- **clap**: For command-line argument parsing
-- **regex**: For AWS config file parsing
-- **anyhow**: For error handling
-- **dirs**: For cross-platform home directory detection
 
 ## License
 
