@@ -1,60 +1,70 @@
-use crate::config::Profile;
-use anyhow::Result;
+use std::fmt;
+
+use anyhow::{Context, Result};
 use inquire::{InquireError, Select};
 
-pub struct ProfileSelector {
-    profiles: Vec<Profile>,
-}
+use crate::config::Profile;
 
-impl ProfileSelector {
-    pub fn new(profiles: Vec<Profile>) -> Self {
-        Self { profiles }
-    }
-
-    pub fn run(&mut self) -> Result<Option<String>> {
-        if self.profiles.is_empty() {
-            return Ok(None);
-        }
-
-        let options: Vec<String> = self.profiles.iter().map(format_profile_display).collect();
-
-        let ans = Select::new("Select AWS Profile:", options)
-            .with_page_size(10)
-            .with_help_message("↑↓ to move, enter to select, type to filter")
-            .prompt();
-
-        match ans {
-            Ok(selected_display) => {
-                // Find the profile that matches the selected display string
-                let selected_profile = self
-                    .profiles
-                    .iter()
-                    .find(|profile| format_profile_display(profile) == selected_display)
-                    .map(|profile| profile.name.clone());
-
-                Ok(selected_profile)
-            }
-            Err(InquireError::OperationCanceled) => Ok(None),
-            Err(InquireError::OperationInterrupted) => Ok(None),
-            Err(e) => Err(anyhow::anyhow!("Selection failed: {}", e)),
-        }
+pub fn select_profile(profiles: Vec<Profile>) -> Result<Option<String>> {
+    let options = profiles.into_iter().map(ProfileOption).collect();
+    match Select::new("Select AWS Profile:", options)
+        .with_page_size(10)
+        .with_help_message("↑↓ to move, enter to select, type to filter, esc to cancel")
+        .prompt_skippable()
+    {
+        Ok(profile) => Ok(profile.map(|profile| profile.0.name)),
+        Err(InquireError::OperationInterrupted) => Ok(None),
+        Err(error) => Err(error).context("Profile selection failed"),
     }
 }
 
-fn format_profile_display(profile: &Profile) -> String {
-    let mut parts = vec![profile.name.clone()];
+struct ProfileOption(Profile);
 
-    if let Some(account_id) = profile.get_account_id() {
-        parts.push(format!("({account_id})"));
+impl fmt::Display for ProfileOption {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0.name)?;
+        if let Some(account) = self.0.get_account_id() {
+            write!(f, " ({account})")?;
+        }
+        if let Some(region) = self.0.get_region() {
+            write!(f, " [{region}]")?;
+        }
+        if let Some(role) = self.0.get_role_name() {
+            write!(f, " {{{role}}}")?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    #[test]
+    fn formats_only_display_metadata() {
+        let profile = Profile {
+            name: "dev".to_owned(),
+            attributes: HashMap::from([
+                ("sso_account_id".to_owned(), "123456789012".to_owned()),
+                ("region".to_owned(), "us-west-2".to_owned()),
+                ("sso_role_name".to_owned(), "DeveloperAccess".to_owned()),
+                ("aws_secret_access_key".to_owned(), "secret".to_owned()),
+            ]),
+        };
+        assert_eq!(
+            ProfileOption(profile).to_string(),
+            "dev (123456789012) [us-west-2] {DeveloperAccess}"
+        );
     }
 
-    if let Some(region) = profile.get_region() {
-        parts.push(format!("[{region}]"));
+    #[test]
+    fn formats_profiles_without_metadata() {
+        let profile = Profile {
+            name: "default".to_owned(),
+            attributes: HashMap::new(),
+        };
+        assert_eq!(ProfileOption(profile).to_string(), "default");
     }
-
-    if let Some(role) = profile.get_role_name() {
-        parts.push(format!("{{{role}}}"));
-    }
-
-    parts.join(" ")
 }

@@ -1,10 +1,17 @@
 use anyhow::{Context, Result};
-use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::env;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone)]
+const CONFIG_ENV: &str = "AWS_CONFIG_FILE";
+const CREDENTIALS_ENV: &str = "AWS_SHARED_CREDENTIALS_FILE";
+
+/// The only config values the selector displays.
+const DISPLAY_KEYS: [&str; 3] = ["sso_account_id", "region", "sso_role_name"];
+
+#[derive(Debug)]
 pub struct Profile {
     pub name: String,
     pub attributes: HashMap<String, String>,
@@ -24,108 +31,238 @@ impl Profile {
     }
 }
 
+#[derive(Clone, Copy)]
+enum FileKind {
+    Config,
+    Credentials,
+}
+
+struct Source {
+    path: PathBuf,
+    label: &'static str,
+    required: bool,
+}
+
 pub fn read_aws_config() -> Result<Vec<Profile>> {
-    let config_path = get_aws_config_path()?;
+    let home = env::home_dir();
+    let default_source = |label: &'static str, file: &'static str| -> Result<Source> {
+        let home = home.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("unable to determine home directory for ~/.aws/{file}")
+        })?;
+        Ok(Source {
+            path: home.join(".aws").join(file),
+            label,
+            required: false,
+        })
+    };
 
-    if !config_path.exists() {
-        return Err(anyhow::anyhow!(
-            "AWS config file not found at {:?}",
-            config_path
-        ));
+    let config = match override_path(CONFIG_ENV) {
+        Some(path) => Source {
+            path,
+            label: "config",
+            required: true,
+        },
+        None => default_source("config", "config")?,
+    };
+    let credentials = match override_path(CREDENTIALS_ENV) {
+        Some(path) => Source {
+            path,
+            label: "credentials",
+            required: true,
+        },
+        None => default_source("credentials", "credentials")?,
+    };
+
+    load_profiles(&config, &credentials)
+}
+
+fn override_path(variable: &str) -> Option<PathBuf> {
+    env::var_os(variable)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn load_profiles(config: &Source, credentials: &Source) -> Result<Vec<Profile>> {
+    let credentials = read_source(credentials)?;
+    let config = read_source(config)?;
+    Ok(parse_contents(config.as_deref(), credentials.as_deref()))
+}
+
+fn read_source(source: &Source) -> Result<Option<String>> {
+    match fs::read_to_string(&source.path) {
+        Ok(content) => Ok(Some(content)),
+        // Absent default files are normal; an explicitly configured file must exist.
+        Err(error) if error.kind() == ErrorKind::NotFound && !source.required => Ok(None),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "failed to read AWS {} file {}",
+                source.label,
+                source.path.display()
+            )
+        }),
     }
-
-    let content = fs::read_to_string(&config_path)
-        .with_context(|| format!("Failed to read AWS config file: {config_path:?}"))?;
-
-    parse_aws_config(&content)
 }
 
-fn get_aws_config_path() -> Result<PathBuf> {
-    let home_dir =
-        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Unable to determine home directory"))?;
-
-    Ok(home_dir.join(".aws").join("config"))
+fn parse_contents(config: Option<&str>, credentials: Option<&str>) -> Vec<Profile> {
+    let mut profiles: BTreeMap<String, HashMap<String, String>> = BTreeMap::new();
+    // Credentials first so config values win; BTreeMap keeps names sorted.
+    if let Some(content) = credentials {
+        collect_profiles(content, FileKind::Credentials, &mut profiles);
+    }
+    if let Some(content) = config {
+        collect_profiles(content, FileKind::Config, &mut profiles);
+    }
+    profiles
+        .into_iter()
+        .map(|(name, mut attributes)| {
+            attributes.retain(|_, value| !value.is_empty());
+            Profile { name, attributes }
+        })
+        .collect()
 }
 
-fn parse_aws_config(content: &str) -> Result<Vec<Profile>> {
-    let section_regex = Regex::new(r"^\s*\[profile\s+([^\]]+)\]")?;
-    let key_value_regex = Regex::new(r"^\s*([^=]+?)\s*=\s*(.*?)\s*$")?;
+fn collect_profiles(
+    content: &str,
+    kind: FileKind,
+    profiles: &mut BTreeMap<String, HashMap<String, String>>,
+) {
+    let mut parsed = BTreeMap::new();
+    let mut defaults = HashMap::new();
+    let mut in_defaults = false;
+    let mut active: Option<(String, HashMap<String, String>)> = None;
+    let mut key_indent: Option<usize> = None;
 
-    let mut profiles = Vec::new();
-    let mut current_profile: Option<String> = None;
-    let mut current_attributes = HashMap::new();
-
-    for line in content.lines() {
-        let line = line.trim();
-
-        if line.is_empty() || line.starts_with('#') {
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
             continue;
         }
 
-        if let Some(captures) = section_regex.captures(line) {
-            if let Some(profile_name) = current_profile.take() {
-                profiles.push(Profile {
-                    name: profile_name,
-                    attributes: current_attributes.clone(),
-                });
-                current_attributes.clear();
-            }
-
-            current_profile = Some(captures[1].trim().to_string());
+        // Any `[...]` line is a section boundary, even when malformed.
+        if line.starts_with('[') {
+            flush(&mut active, &mut parsed);
+            let section = section_body(line);
+            in_defaults = matches!(kind, FileKind::Config) && section == Some("DEFAULT");
+            active = section
+                .and_then(|body| profile_name(body, kind))
+                .map(|name| (name, HashMap::new()));
+            key_indent = None;
             continue;
         }
 
-        if current_profile.is_some() {
-            if let Some(captures) = key_value_regex.captures(line) {
-                let key = captures[1].trim().to_string();
-                let value = captures[2].trim().to_string();
-                current_attributes.insert(key, value);
+        let attributes = if in_defaults {
+            &mut defaults
+        } else if let Some((_, attributes)) = active.as_mut() {
+            attributes
+        } else {
+            continue;
+        };
+
+        // AWS nests settings under the preceding key by indentation alone.
+        let indent = raw.len() - raw.trim_start().len();
+        if key_indent.is_some_and(|parent| indent > parent) {
+            continue;
+        }
+
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        key_indent = Some(indent);
+
+        let key = key.trim().to_ascii_lowercase();
+        let value = value.trim();
+        if !matches!(kind, FileKind::Config) || !DISPLAY_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        attributes.insert(key, value.to_string());
+    }
+
+    flush(&mut active, &mut parsed);
+    for (name, mut attributes) in parsed {
+        for (key, value) in &defaults {
+            attributes
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        }
+        profiles.entry(name).or_default().extend(attributes);
+    }
+}
+
+fn flush(
+    active: &mut Option<(String, HashMap<String, String>)>,
+    profiles: &mut BTreeMap<String, HashMap<String, String>>,
+) {
+    if let Some((name, attributes)) = active.take() {
+        profiles.entry(name).or_default().extend(attributes);
+    }
+}
+
+/// Returns the text inside `[...]`, allowing a trailing `#`/`;` comment.
+fn section_body(line: &str) -> Option<&str> {
+    let (body, after) = line.strip_prefix('[')?.split_once(']')?;
+    let after = after.trim();
+    if after.is_empty() || after.starts_with('#') || after.starts_with(';') {
+        Some(body.trim())
+    } else {
+        None
+    }
+}
+
+fn profile_name(section: &str, kind: FileKind) -> Option<String> {
+    if section.is_empty() {
+        return None;
+    }
+
+    match kind {
+        FileKind::Config => {
+            if section == "default" {
+                return Some("default".to_string());
+            }
+            let (head, rest) = split_head(section)?;
+            if head != "profile" {
+                return None;
+            }
+            decode_profile_name(rest.trim())
+        }
+        // Credentials sections are literal names; DEFAULT is configparser's defaults section.
+        FileKind::Credentials => {
+            if section == "DEFAULT" {
+                None
+            } else {
+                Some(section.to_string())
             }
         }
     }
+}
 
-    if let Some(profile_name) = current_profile {
-        profiles.push(Profile {
-            name: profile_name,
-            attributes: current_attributes,
-        });
+fn split_head(section: &str) -> Option<(&str, &str)> {
+    section
+        .find(char::is_whitespace)
+        .map(|index| (&section[..index], &section[index..]))
+}
+
+fn decode_profile_name(value: &str) -> Option<String> {
+    let mut name = String::new();
+    let mut quote = None;
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        match (quote, ch) {
+            (Some('\''), '\'') | (Some('"'), '"') => quote = None,
+            (Some('\''), ch) => name.push(ch),
+            (_, '\\') => {
+                let next = chars.next()?;
+                if quote == Some('"') && !matches!(next, '"' | '\\') {
+                    name.push('\\');
+                }
+                name.push(next);
+            }
+            (None, '\'' | '"') => quote = Some(ch),
+            (None, ch) if ch.is_whitespace() => return None,
+            (_, ch) => name.push(ch),
+        }
     }
-
-    profiles.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(profiles)
+    (quote.is_none() && !name.is_empty()).then_some(name)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_aws_config() {
-        let config_content = r#"
-[profile default]
-region = us-east-1
-output = json
-
-[profile dev]
-sso_account_id = 123456789012
-sso_role_name = DeveloperAccess
-region = us-west-2
-sso_start_url = https://example.awsapps.com/start
-
-[profile prod]
-sso_account_id = 987654321098
-sso_role_name = ReadOnlyAccess  
-region = us-east-1
-"#;
-
-        let profiles = parse_aws_config(config_content).unwrap();
-
-        assert_eq!(profiles.len(), 3);
-        assert_eq!(profiles[0].name, "default");
-        assert_eq!(profiles[1].name, "dev");
-        assert_eq!(profiles[2].name, "prod");
-
-        assert_eq!(profiles[1].get_account_id().unwrap(), "123456789012");
-        assert_eq!(profiles[1].get_role_name().unwrap(), "DeveloperAccess");
-    }
-}
+mod tests;

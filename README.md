@@ -1,250 +1,169 @@
 # AWS Profile Selector
 
-A fast, interactive AWS profile selector CLI tool built in Rust.
+A small Rust CLI for selecting AWS profiles with inline fuzzy search.
 
-## Features
+## Install
 
-- 🔍 **Fuzzy search** through AWS profiles
-- ⚡ **Fast inline interface** - no full-screen takeover
-- 🎯 **Arrow key navigation**
-- 📦 **Single binary** with no runtime dependencies
+With Nix and flakes enabled:
 
-## Installation
-
-### Option 1: Direct Installation with Nix Profile
-```bash
-# Install directly from GitHub
-nix profile install github:stephenstubbs/aws-profile-selector
-
-# Verify installation
+```sh
+nix profile add github:stephenstubbs/aws-profile-selector
 aws-profile-selector --help
 ```
 
-### Option 2: Run Without Installing
-```bash
-# Run directly from GitHub
+Or run without installing:
+
+```sh
 nix run github:stephenstubbs/aws-profile-selector -- --help
 ```
 
-### Option 3: Add to Your Flake
-Add to `flake.nix` inputs:
+From a checkout with a current stable Rust toolchain:
+
+```sh
+cargo install --path . --locked
+```
+
+### Use from another flake
+
 ```nix
 {
-  inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-
-    aws-profile-selector = {
-      url = "github:stephenstubbs/aws-profile-selector";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
+  inputs.aws-profile-selector = {
+    url = "github:stephenstubbs/aws-profile-selector";
+    inputs.nixpkgs.follows = "nixpkgs";
   };
-
-  outputs = { self, nixpkgs, aws-profile-selector, ... }:
-    let
-      system = "x86_64-linux";
-      pkgs = nixpkgs.legacyPackages.${system};
-    in
-    {
-      devShells.${system}.default = pkgs.mkShell {
-        packages = [
-          aws-profile-selector.packages.${system}.default
-        ];
-      };
-    };
 }
 ```
 
-### Option 4: Development Environment
-```bash
-# Clone and enter development environment
-git clone https://github.com/stephenstubbs/aws-profile-selector
-cd aws-profile-selector
-nix develop
-
-# Build and run
-cargo build --release
-./target/release/aws-profile-selector --help
-```
+Add `aws-profile-selector.packages.${system}.default` to your packages.
+The self-contained `aws-profile-selector.overlays.default` also exposes
+`pkgs.aws-profile-selector`.
 
 ## Usage
 
-### Direct Usage
-
-Run the selector directly:
-```bash
-./target/release/aws-profile-selector
+```sh
+aws-profile-selector                 # Fuzzy-search configured profiles
+aws-profile-selector -a dev          # Activate an existing profile
+aws-profile-selector -n custom       # Save a name without checking configuration
+aws-profile-selector -d              # Remove the saved selection
+aws-profile-selector -c -a dev       # Print a command for this shell only
+aws-profile-selector -c -d           # Print a command to unset AWS_PROFILE
+aws-profile-selector -c -n dev --shell nu
 ```
 
-**Interactive Mode (default):**
-```bash
-aws-profile-selector                    # Interactive selection
-```
+`--activate`, `--new`, and `--deactivate` are mutually exclusive.
+Profile names must be nonempty and contain no control characters or surrounding
+whitespace. Use **↑/↓**, type to filter, and **Enter** to select.
+**Esc** or **Ctrl+C** cancels without changing the saved selection.
 
-**Direct Profile Activation:**
-```bash
-aws-profile-selector -a dev             # Activate 'dev' profile directly
-aws-profile-selector --activate prod    # Activate 'prod' profile directly
-```
-
-**Set New Profile (not in config):**
-```bash
-aws-profile-selector -n custom          # Set 'custom' profile (even if not in AWS config)
-aws-profile-selector --new temp-profile # Set 'temp-profile' profile
-```
-
-**Deactivate Profile:**
-```bash
-aws-profile-selector -d                 # Deactivate AWS_PROFILE
-aws-profile-selector --deactivate       # Deactivate AWS_PROFILE
-```
-
-**Set Profile for Current Shell Only:**
-```bash
-# For current shell session only (doesn't write to ~/.aws/current-profile)
-aws-profile-selector -c                 # Interactive selection, outputs shell command
-aws-profile-selector -c -a dev          # Outputs: $env.AWS_PROFILE = "dev"
-aws-profile-selector -c -n custom       # Outputs: $env.AWS_PROFILE = "custom"
-aws-profile-selector -c -d              # Outputs: hide-env AWS_PROFILE
-```
-
-**Options:**
-- `-a, --activate <PROFILE>`: Activate a specific profile by name (skips interactive selection)
-- `-n, --new <PROFILE>`: Set a profile name that is not available in the list
-- `-c, --current`: Output shell commands for current shell only (doesn't write to file)
-- `-d, --deactivate`: Deactivate AWS_PROFILE
-
-### Shell Integration (Nushell)
-
-Add these functions and hooks to your nushell config (`~/.config/nushell/config.nu`):
-
-#### Option 1: Using --wrapped flag (Recommended for Nushell 0.91.0+)
-```nu
-def --env --wrapped awsps [...args] {
-    # Check if -c or --current is in the arguments
-    let is_current = ($args | any {|arg| $arg == "-c" or $arg == "--current"})
-    
-    if $is_current {
-        # Interactive mode with -c: run and capture output to set env var
-        let cmd = (^aws-profile-selector ...$args | str trim)
-        
-        if ($cmd | is-not-empty) {
-            if ($cmd | str contains '$env.AWS_PROFILE') {
-                # Extract the profile name from: $env.AWS_PROFILE = "profile-name"
-                let parts = ($cmd | parse '$env.AWS_PROFILE = "{profile}"')
-                if ($parts | length) > 0 {
-                    let profile = ($parts | first | get profile)
-                    $env.AWS_PROFILE = $profile
-                    $env.AWS_PROFILE_CURRENT_SHELL = "true"
-                    print $"AWS_PROFILE set to ($profile) for current shell"
-                }
-            } else if ($cmd == 'hide-env AWS_PROFILE') {
-                hide-env AWS_PROFILE
-                if "AWS_PROFILE_CURRENT_SHELL" in $env {
-                    hide-env AWS_PROFILE_CURRENT_SHELL
-                }
-                print "AWS_PROFILE unset for current shell"
-            }
-        }
-    } else {
-        # Non-current mode: clear current shell flag and pass through
-        if "AWS_PROFILE_CURRENT_SHELL" in $env {
-            hide-env AWS_PROFILE_CURRENT_SHELL
-        }
-        ^aws-profile-selector ...$args
-    }
-}
-
-# Usage examples:
-# awsps                      # Interactive selection (writes to file, hooks handle it)
-# awsps -a dev              # Activate 'dev' profile (writes to file, hooks handle it)
-# awsps -d                  # Deactivate profile (removes file, hooks handle it)
-# awsps -c                  # Interactive selection for current shell only
-# awsps -c -a dev           # Activate 'dev' for current shell only
-# awsps -c -d               # Deactivate for current shell only
-# awsps --current -n custom # Set custom profile for current shell only
-# awsps --help              # Show help for aws-profile-selector
-```
-
-**Note:** The `--wrapped` flag allows the function to receive all arguments without Nushell intercepting flags like `--help`. This provides seamless pass-through of all arguments to the underlying `aws-profile-selector` command.
-
-#### Option 2: Persistent Profile (File-based)
-```nu
-def --env load_aws_profile [] {
-    if "AWS_PROFILE_CURRENT_SHELL" in $env {
-        return
-    }
-
-    let current_profile_file = ([$env.HOME ".aws" "current-profile"] | path join)
-
-    if ($current_profile_file | path exists) {
-        let profile_name = (open $current_profile_file | str trim)
-        if ($profile_name | is-not-empty) {
-            $env.AWS_PROFILE = $profile_name
-        }
-    } else {
-        if "AWS_PROFILE" in $env {
-            hide-env AWS_PROFILE
-        }
-    }
-}
-
-# Set up hooks to automatically load AWS profile
-$env.config = ($env.config | upsert hooks {
-    pre_prompt: [
-        { ||
-            load_aws_profile
-        }
-    ]
-    env_change: {
-        PWD: [
-            { |before, after|
-                load_aws_profile
-            }
-        ]
-    }
-})
-```
-
-This configuration will:
-- **Automatically load the AWS profile** when nushell starts
-- **Re-load the AWS profile** every time you change directories (`cd`)
-- **Re-load the AWS profile** before each prompt is displayed
-- **Provide the `awsps` command** for interactive profile selection and management
-
-
-## How It Works
-
-1. **Reads your AWS config** from `~/.aws/config`
-2. **Parses profile sections** and extracts metadata (account ID, region, role name)
-3. **Presents an interactive list** with fuzzy search capabilities
-4. **Stores the selected profile** in `~/.aws/current-profile`
-5. **Nushell integration** reads this file to set `$env.AWS_PROFILE`
-
-## Interface
-
-- **↑/↓ arrows**: Navigate through profiles
-- **Type**: Filter profiles with fuzzy search (no need to press `/`)
-- **Enter**: Select the highlighted profile
-- **Esc/q**: Cancel and exit
-
-## AWS Config Format
-
-The tool reads standard AWS config files. Example:
+Profiles come from `~/.aws/config` and `~/.aws/credentials`, including `default`
+and credentials-only profiles. `AWS_CONFIG_FILE` and
+`AWS_SHARED_CREDENTIALS_FILE` override those paths. Missing default files are
+allowed; missing or unreadable explicit overrides are errors.
+Only account ID, region, and SSO role metadata from config are displayed.
 
 ```ini
+[default]
+region = us-east-1
+
 [profile dev]
+sso_session = work
 sso_account_id = 123456789012
 sso_role_name = DeveloperAccess
 region = us-west-2
-sso_start_url = https://example.awsapps.com/start
 
-[profile prod]
-sso_account_id = 987654321098
-sso_role_name = ReadOnlyAccess
-region = us-east-1
+[sso-session work]
 sso_start_url = https://example.awsapps.com/start
+sso_region = us-east-1
 ```
+
+By default, the selection is saved atomically to `~/.aws/current-profile`.
+The CLI cannot modify its parent shell: a shell integration must read that file.
+`--current` instead prints a safely quoted shell command and never changes the
+file. Syntax is detected from the basename of `$SHELL`; use `--shell posix`
+(`sh`, `bash`, `zsh`), `--shell fish`, or `--shell nu` to override it.
+Errors go to stderr, leaving stdout usable for command capture.
+
+### Nushell integration
+
+Add this to `config.nu`, replacing the path with your checkout:
+
+```nu
+source /path/to/aws-profile-selector/shell/awsps.nu
+```
+
+Nix packages also install the script at
+`share/aws-profile-selector/awsps.nu`. For example, in a Home Manager module:
+
+```nix
+{ pkgs, ... }:
+{
+  home.packages = [ pkgs.aws-profile-selector ];
+  programs.nushell = {
+    enable = true;
+    extraConfig = ''
+      source ${pkgs.aws-profile-selector}/share/aws-profile-selector/awsps.nu
+    '';
+  };
+}
+```
+
+This example assumes the overlay above is in `nixpkgs.overlays`.
+
+```nu
+awsps                    # Select and load a saved profile
+awsps -a dev             # Activate and load dev
+awsps -c -n temporary    # Override only this shell
+awsps -c -d              # Disable only this shell, keeping the saved profile
+awsps -d                 # Clear the saved profile and this shell's override
+```
+
+The script appends a pre-prompt hook without replacing existing hooks.
+Current-shell overrides, including deactivation, survive subsequent prompts.
+Generated values are decoded as data, not evaluated as Nushell code.
+
+### POSIX shells and Fish
+
+For a current-shell selection:
+
+```sh
+eval "$(aws-profile-selector --current --shell posix)"
+```
+
+```fish
+aws-profile-selector --current --shell fish | source
+```
+
+## Development
+
+The flake provides the latest stable Rust toolchain available in its lock,
+including rustfmt, Clippy, rust-src, and rust-analyzer. Package builds use the
+same toolchain. Nix supports Linux on x86-64 and ARM64, and macOS on Apple
+Silicon. Nixpkgs 26.11 no longer supports Intel macOS.
+
+```sh
+direnv allow
+direnv reload
+cargo test --locked --all-targets
+cargo clippy --locked --all-targets -- -D warnings
+cargo fmt --all -- --check
+cargo deny check advisories
+nix flake check --print-build-logs
+```
+
+Flake checks build and test the release package, check Clippy and formatting,
+and exercise Nushell integration and POSIX/Fish/Nushell quoting in isolation.
+
+To refresh dependencies:
+
+```sh
+nix flake update
+direnv reload
+cargo upgrade --incompatible
+cargo update
+```
+
+Review and retain both lockfiles for reproducible builds.
 
 ## License
 
-MIT License
+MIT.
