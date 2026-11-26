@@ -71,9 +71,18 @@
               inherit (manifest) version;
               src = source;
               cargoLock.lockFile = ./Cargo.lock;
+              nativeCheckInputs = [
+                prev.bash
+                prev.coreutils
+              ];
+              passthru = {
+                awsProfileContextVersion = 1;
+                awsProfileConfigVersion = 1;
+              };
 
               postInstall = ''
                 install -Dm644 shell/awsps.nu "$out/${shellIntegration}"
+                install -Dm644 shell/awsps.bash "$out/share/${manifest.name}/awsps.bash"
               '';
 
               meta = {
@@ -127,19 +136,38 @@
             {
               nativeBuildInputs = [
                 pkgs.aws-profile-selector
+                pkgs.bash
+                pkgs.coreutils
                 pkgs.fish
                 pkgs.nushell
               ];
             }
             ''
-              mkdir -p work/tests work/shell
-              cp ${source}/tests/nushell.nu ${source}/tests/shells.nu work/tests/
+              mkdir -p work/shell
+              cp -r ${source}/tests work/tests
               ln -s ${pkgs.aws-profile-selector}/${shellIntegration} work/shell/awsps.nu
-              cd work/tests
+              ln -s ${pkgs.aws-profile-selector}/share/${manifest.name}/awsps.bash work/shell/awsps.bash
+              cd work
               export HOME="$(mktemp -d)"
-              nu --no-config-file nushell.nu
+              bash tests/bash.sh ${pkgs.aws-profile-selector}/bin/${manifest.name}
+              nu --no-config-file tests/nushell.nu ${pkgs.aws-profile-selector}/bin/${manifest.name}
               export HOME="$(mktemp -d)"
-              nu --no-config-file shells.nu
+              nu --no-config-file tests/shells.nu
+              touch "$out"
+            '';
+        interactive =
+          pkgs.runCommand "${manifest.name}-interactive"
+            {
+              nativeBuildInputs = [
+                pkgs.aws-profile-selector
+                pkgs.bash
+                pkgs.nushell
+                pkgs.python3
+              ];
+            }
+            ''
+              cd ${source}
+              python3 tests/interactive.py ${pkgs.aws-profile-selector}/bin/${manifest.name}
               touch "$out"
             '';
       });
@@ -154,6 +182,8 @@
             cargo-edit
             nixfmt
             nushell
+            python3
+            fish
           ];
         };
       });

@@ -1,11 +1,16 @@
-use clap::{ArgGroup, Parser};
+use aws_profile_selector::metadata::command::ConfigCommand;
+use clap::{ArgGroup, Parser, Subcommand};
 
 use crate::shell::Shell;
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
-#[command(group(ArgGroup::new("action").args(["activate", "new_profile", "deactivate"])))]
+#[command(args_conflicts_with_subcommands = true)]
+#[command(group(ArgGroup::new("action").args(["activate", "new_profile", "deactivate", "show_current", "list"])))]
+#[command(group(ArgGroup::new("shell_output").args(["current", "context"]).multiple(true)))]
 pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<Management>,
     /// Activate an existing AWS profile without interactive selection
     #[arg(short, long, value_name = "PROFILE", value_parser = parse_profile_name)]
     pub activate: Option<String>,
@@ -22,14 +27,45 @@ pub struct Cli {
     #[arg(short, long)]
     pub current: bool,
 
-    /// Shell syntax for --current (otherwise detected from SHELL)
-    #[arg(long, value_enum, requires = "current")]
+    /// Print saved selection without creating or changing state
+    #[arg(long, conflicts_with = "current")]
+    pub show_current: bool,
+
+    /// List native profile names without selecting one
+    #[arg(short, long, conflicts_with_all = ["current", "json", "context"])]
+    pub list: bool,
+
+    /// Emit selection metadata rather than a human-readable activation message
+    #[arg(long)]
+    pub context: bool,
+
+    /// Emit {"profile":NAME_OR_NULL}; selection and persistence are one operation
+    #[arg(long)]
+    pub json: bool,
+
+    /// Shell syntax for --current or --context (otherwise detected from SHELL)
+    #[arg(long, value_enum, requires = "shell_output")]
     pub shell: Option<Shell>,
 }
 
+#[derive(Debug, Subcommand)]
+pub enum Management {
+    /// Explicit SSO metadata setup and synchronization, separate from selection and login
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+}
+
 pub fn validate_profile_name(name: &str) -> Result<(), &'static str> {
-    if name.is_empty() || name.trim() != name || name.chars().any(char::is_control) {
-        Err("Profile names must be nonempty, with no control characters or surrounding whitespace")
+    if name.is_empty()
+        || name.len() > 512
+        || name.trim() != name
+        || name.chars().any(char::is_control)
+    {
+        Err(
+            "Profile names must contain 1..512 bytes, with no control characters or surrounding whitespace",
+        )
     } else {
         Ok(())
     }
